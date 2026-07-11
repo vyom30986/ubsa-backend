@@ -376,7 +376,11 @@ def converse(history, candidates, groq_key, shop="the bookstore", turn=0):
         + f"So far the customer has sent {turn} message(s); if that is fewer than 3, ask ONE more natural question that follows on from what they said. "
         + "Only once you truly understand the reader, write ONE warm sentence and END your reply with a line exactly like "
         "[[RECOMMEND: <a few keywords>]] - the app then shows the book cards, so do NOT list titles yourself. "
-        "While still getting to know them, ask ONE short question and do NOT include the tag."
+        "IMPORTANT: If the customer asks for a SPECIFIC book BY TITLE (for example 'Harry Potter') that is NOT in the "
+        "catalogue above, do NOT pretend to have it and do NOT keep asking questions - instead END your reply with a line "
+        "exactly like [[UNAVAILABLE: <the exact title they asked for> || <2-4 genre or theme keywords for close matches>]]. "
+        "The app will then apologise by name and show the closest in-stock books. "
+        "While still getting to know them, ask ONE short question and do NOT include any tag."
     )
     messages = [{"role": "system", "content": sys}] + history[-10:]
     out = _llm_chat(messages, groq_key)
@@ -384,12 +388,23 @@ def converse(history, candidates, groq_key, shop="the bookstore", turn=0):
         return None
 
     def parse(txt):
+        un = re.search(r"\[\[\s*UNAVAILABLE:(.*?)\]\]", txt, re.S)
+        unavailable = un_kw = None
+        if un:
+            inner = un.group(1).strip()
+            if "||" in inner:
+                unavailable, un_kw = [p.strip() for p in inner.split("||", 1)]
+            else:
+                unavailable = inner
         mm = re.search(r"\[\[\s*RECOMMEND:(.*?)\]\]", txt, re.S)
         q = mm.group(1).strip() if mm else None
-        rp = re.sub(r"\[\[\s*RECOMMEND:.*?\]\]", "", txt, flags=re.S).strip()
-        return rp, q
+        rp = re.sub(r"\[\[\s*(?:RECOMMEND|UNAVAILABLE):.*?\]\]", "", txt, flags=re.S).strip()
+        return rp, q, unavailable, un_kw
 
-    reply, query = parse(out)
+    reply, query, unavailable, un_kw = parse(out)
+    # Customer named a specific title we do NOT carry -> apologise + show closest matches now.
+    if unavailable:
+        return {"reply": reply, "query": (un_kw or query or unavailable), "unavailable": unavailable}
     # Too early to recommend -> ask the LLM for one MORE natural, contextual question
     # (not a canned one), so it follows on from what the customer just said.
     if query and turn < 3:
@@ -400,14 +415,14 @@ def converse(history, candidates, groq_key, shop="the bookstore", turn=0):
                                         "reading level. No book titles, no RECOMMEND tag.)"}]
         out2 = _llm_chat(nudge, groq_key)
         if out2:
-            reply, _ = parse(out2)
+            reply, _, _, _ = parse(out2)
         query = None
 
     if any(f in reply.lower() for f in FORBIDDEN):
         reply = "Let me find you a lovely physical copy from our shelves."
     if not reply:
         reply = "Could you tell me a little more about the reader?"
-    return (reply, query)
+    return {"reply": reply, "query": query, "unavailable": None}
 
 
 def synopsis(book, groq_key):

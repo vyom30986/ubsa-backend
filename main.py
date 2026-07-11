@@ -250,7 +250,37 @@ def message(store_id: str, session_id: str, body: MessageIn, s: Session = Depend
     user_turns = sum(1 for m in st["history"] if m["role"] == "user")
     conv = converse(st["history"], candidates, GROQ_KEY, shop, turn=user_turns)
     if conv is not None:
-        reply, query = conv   # converse() keeps profiling naturally until it knows the reader
+        reply = conv["reply"]; query = conv["query"]; unavailable = conv.get("unavailable")
+        # Customer asked for a specific title we DON'T carry -> apologise by name + closest matches.
+        if unavailable:
+            sel = select_books(query, candidates, st["slots"])
+            top = sel["top_pick"]
+            kw = (query or "").lower()
+            descriptor = ""
+            for g in ("fantasy", "mystery", "romance", "thriller", "adventure", "science fiction",
+                      "sci-fi", "horror", "poetry", "self-help", "biography", "history", "classic"):
+                if g in kw:
+                    descriptor = g; break
+            if not descriptor:
+                descriptor = (top.get("genre") or "").lower()
+            reply = (f"We're so sorry — “{unavailable}” is currently out of stock. "
+                     f"But here are the closest {descriptor + ' ' if descriptor else ''}stories we have for you.")
+            st["history"].append({"role": "assistant", "content": reply})
+            for c in [top, *sel["alternatives"]]:
+                s.add(M.SalesEvent(store_id=store_id, session_id=session_id,
+                                   book_id=c["book_id"], event_type="interested"))
+            row = s.exec(select(M.AskedNotBought).where(M.AskedNotBought.store_id == store_id,
+                                                        M.AskedNotBought.title == unavailable)).first()
+            if row:
+                row.times_asked += 1; s.add(row)
+            else:
+                s.add(M.AskedNotBought(store_id=store_id, title=unavailable, times_asked=1))
+            s.commit()
+            return {"state": "responding", "reply": reply,
+                    "recommendations": {"top_pick": top, "alternatives": sel["alternatives"]},
+                    "unavailable_title": unavailable,
+                    "suggested_action": "add_to_basket" if top["in_stock"] else "create_procurement",
+                    "requires_staff_handoff": False}
         st["history"].append({"role": "assistant", "content": reply})
         if query:
             sel = select_books(query, candidates, st["slots"])
